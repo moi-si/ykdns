@@ -208,7 +208,7 @@ func init() {
 }
 
 func main() {
-	fmt.Println("SnowDNS v0.1.0")
+	fmt.Println("YukiDNS (Go Version) v0.1.0")
 
 	server := &dns.Server{Addr: *listenAddr, Net: "udp"}
 	dns.HandleFunc(".", handler)
