@@ -146,7 +146,7 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 func init() {
 	listenAddr = flag.String("addr", "127.0.0.1:8053", "Listen address")
 	dftDoH := flag.String("dftdoh", "https://cloudflare-dns.com/dns-query", "Default DoH")
-	dmsDNS := flag.String("dmsdns", "223.5.5.5:53", "Domestic DNS over UDP/HTTPS")
+	dmsDNS := flag.String("dmsdns", "udp://223.5.5.5:53", "Domestic DNS over UDP/TLS/HTTPS")
 	proxyAddr := flag.String("proxy", "", "Address of SOCKS5 Proxy server for default DoH")
 	confPath := flag.String("conf", "sites.conf", "Sites config file path")
 	ipListPath := flag.String("ips", "ips.txt", "Domestic IP/CIDR list file path")
@@ -175,7 +175,7 @@ func init() {
 
 	var httpCli *http.Client
 	if *proxyAddr == "" {
-		httpCli = &http.Client{}
+		httpCli = new(http.Client)
 		dftExchange = func(req *dns.Msg) (*dns.Msg, error) {
 			return dohExchange(req, *dftDoH, httpCli)
 		}
@@ -183,7 +183,7 @@ func init() {
 		ssHttpCli, err := newSock5HttpClient(*proxyAddr)
 		if err != nil {
 			fmt.Println("Failed to create SOCKS5 HTTP client:", err)
-			return
+			os.Exit(0)
 		}
 		dftExchange = func(req *dns.Msg) (*dns.Msg, error) {
 			return dohExchange(req, *dftDoH, ssHttpCli)
@@ -191,13 +191,21 @@ func init() {
 	}
 	if strings.HasPrefix(*dmsDNS, "https://") {
 		if httpCli == nil {
-			httpCli = &http.Client{}
+			httpCli = new(http.Client)
 		}
 		dmsExchange = func(req *dns.Msg) (*dns.Msg, error) {
 			return dohExchange(req, *dmsDNS, httpCli)
 		}
 	} else {
 		dnsCli := new(dns.Client)
+		if strings.HasPrefix(*dmsDNS, "tls://") {
+			dnsCli.Net = "tcp-tls"
+		} else if strings.HasPrefix(*dmsDNS, "tcp://") {
+			dnsCli.Net = "tcp"
+		} else if !strings.HasPrefix(*dmsDNS, "udp://") {
+			fmt.Println("Unknown domestic DNS protocol")
+			os.Exit(0)
+		}
 		dmsExchange = func(req *dns.Msg) (*dns.Msg, error) {
 			in, _, err := dnsCli.Exchange(req, *dmsDNS)
 			return in, err
