@@ -36,19 +36,19 @@ var (
 	cacheTTL              = 300 * time.Second
 )
 
-func isDomestic(domain string) (bool, *dns.Msg, error) {
+func isDomestic(domain string) (bool, error) {
 	isDom := domainMatcher.Find(domain[:len(domain)-1])
 	if isDom != nil {
-		return *isDom, nil, nil
+		return *isDom, nil
 	}
 	msg := new(dns.Msg)
 	msg.SetQuestion(domain, dns.TypeA)
 	in, err := dmsExchange(msg)
 	if err != nil {
-		return false, nil, fmt.Errorf("dmsExchange: %s", err)
+		return false, fmt.Errorf("dmsExchange: %s", err)
 	}
 	if in.Rcode != dns.RcodeSuccess {
-		return false, nil, fmt.Errorf("dmsExchange: %s", dns.RcodeToString[in.Rcode])
+		return false, fmt.Errorf("dmsExchange: %s", dns.RcodeToString[in.Rcode])
 	}
 	var ip string
 	for _, ans := range in.Answer {
@@ -58,7 +58,7 @@ func isDomestic(domain string) (bool, *dns.Msg, error) {
 		}
 	}
 	if ip == "" {
-		return false, nil, fmt.Errorf("dmsExchange: A record not found")
+		return false, fmt.Errorf("dmsExchange: A record not found")
 	}
 	if strings.Contains(ip, ":") {
 		isDom, _ = ipv6Trie.Find(ip)
@@ -66,9 +66,9 @@ func isDomestic(domain string) (bool, *dns.Msg, error) {
 		isDom = ipv4Trie.Find(ip)
 	}
 	if isDom == nil {
-		return false, in, nil
+		return false, nil
 	}
-	return *isDom, in, nil
+	return *isDom, nil
 }
 
 func handler(w dns.ResponseWriter, req *dns.Msg) {
@@ -98,24 +98,22 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		log.Printf("Cache for %s expired and was deleted", ck)
 	}
 
-	var in *dns.Msg
 	var isDom bool
 	var err error
 	if v, ok := typeCache.Load(qname); ok {
 		isDom = v.(bool)
 	} else {
-		isDom, in, err = isDomestic(qname)
+		isDom, err = isDomestic(qname)
 		if err != nil {
 			log.Printf("%s: %s", qname, err)
 			return
 		}
 		typeCache.Store(qname, isDom)
 	}
+	var in *dns.Msg
 	if isDom {
 		log.Println(qname, "is domestic domain")
-		if in == nil {
-			in, err = dmsExchange(req)
-		}
+		in, err = dmsExchange(req)
 	} else {
 		log.Println(qname, "is foreign domain")
 		in, err = dftExchange(req)
