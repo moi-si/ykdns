@@ -19,6 +19,8 @@ func loadConfig(path string, insertFunc func(string, bool) error) error {
 	if err != nil {
 		return fmt.Errorf("load file: %s", err)
 	}
+	defer f.Close()
+
 	scanner := bufio.NewScanner(f)
 	var num uint
 	var skip bool
@@ -45,9 +47,9 @@ func loadConfig(path string, insertFunc func(string, bool) error) error {
 		}
 		var err error
 		if strings.HasPrefix(line, "dft ") {
-			err = insertFunc(line[4:], dft)
+			err = insertFunc(line[4:len(line)-1], dft)
 		} else if strings.HasPrefix(line, "dms ") {
-			err = insertFunc(line[4:], dms)
+			err = insertFunc(line[4:len(line)-1], dms)
 		} else {
 			return fmt.Errorf("line %d: `%s` is invalid", num, line)
 		}
@@ -88,15 +90,6 @@ func loadDmsIP(path string) error {
 }
 
 func writeTypeCache() error {
-	var notEmpty bool
-	typeCache.Range(func(k,v any) bool {
-		notEmpty = true
-		return false
-	})
-	if !notEmpty {
-		return nil
-	}
-
 	f, err := os.Create(*cachePath)
 	if err != nil {
 		return fmt.Errorf("create file: %s", err)

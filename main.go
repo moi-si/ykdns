@@ -14,12 +14,13 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/moi-si/addrtrie"
+	"golang.org/x/sync/singleflight"
 )
 
 type cacheEntry struct {
-	rcode    int
-	answer   []dns.RR
-	expireAt time.Time
+	rcode             int
+	answer, ns, extra []dns.RR
+	expireAt          time.Time
 }
 
 func cacheKey(domain string, qtype uint16) string {
@@ -33,43 +34,10 @@ var (
 	ipv6Trie              *addrtrie.BitTrie6[bool]
 	typeCache             sync.Map
 	cache                 sync.Map
+	reqGroup              = new(singleflight.Group)
 	cacheTTL              = 300 * time.Second
+	isDomestic            func(string) (bool, error)
 )
-
-func isDomestic(domain string) (bool, error) {
-	isDom := domainMatcher.Find(domain[:len(domain)-1])
-	if isDom != nil {
-		return *isDom, nil
-	}
-	msg := new(dns.Msg)
-	msg.SetQuestion(domain, dns.TypeA)
-	in, err := dmsExchange(msg)
-	if err != nil {
-		return false, fmt.Errorf("dmsExchange: %s", err)
-	}
-	if in.Rcode != dns.RcodeSuccess {
-		return false, fmt.Errorf("dmsExchange: %s", dns.RcodeToString[in.Rcode])
-	}
-	var ip string
-	for _, ans := range in.Answer {
-		if record, ok := ans.(*dns.A); ok {
-			ip = record.A.String()
-			continue
-		}
-	}
-	if ip == "" {
-		return false, fmt.Errorf("dmsExchange: A record not found")
-	}
-	if strings.Contains(ip, ":") {
-		isDom, _ = ipv6Trie.Find(ip)
-	} else {
-		isDom = ipv4Trie.Find(ip)
-	}
-	if isDom == nil {
-		return false, nil
-	}
-	return *isDom, nil
-}
 
 func handler(w dns.ResponseWriter, req *dns.Msg) {
 	if len(req.Question) == 0 {
@@ -88,6 +56,8 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		log.Println("Cache hit:", ck)
 		resp.Rcode = entry.rcode
 		resp.Answer = entry.answer
+		resp.Ns = entry.ns
+		resp.Extra = entry.extra
 		if time.Now().Before(entry.expireAt) {
 			if err := w.WriteMsg(resp); err != nil {
 				log.Println("Error writing message:", err)
@@ -98,25 +68,21 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		log.Printf("Cache for %s expired and was deleted", ck)
 	}
 
-	var isDom bool
-	var err error
-	if v, ok := typeCache.Load(qname); ok {
-		isDom = v.(bool)
-	} else {
-		isDom, err = isDomestic(qname)
-		if err != nil {
-			log.Printf("%s: %s", qname, err)
-			return
-		}
-		typeCache.Store(qname, isDom)
+	isDom, err := isDomestic(qname)
+	if err != nil {
+		log.Printf("%s: %s", qname, err)
+		return
 	}
-	var in *dns.Msg
 	if isDom {
-		log.Println(qname, "is domestic domain")
-		in, err = dmsExchange(req)
+		log.Println(qname, "is a domestic domain")
+		v, err, _ = reqGroup.Do(ck, func() (any, error) {
+			return dmsExchange(req)
+		})
 	} else {
-		log.Println(qname, "is foreign domain")
-		in, err = dftExchange(req)
+		log.Println(qname, "is a foreign domain")
+		v, err, _ = reqGroup.Do(ck, func() (any, error) {
+			return dftExchange(req)
+		})
 	}
 
 	if err != nil {
@@ -127,6 +93,7 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		}
 		return
 	}
+	in := v.(*dns.Msg)
 	ce := cacheEntry{
 		rcode:    in.Rcode,
 		answer:   in.Answer,
@@ -135,6 +102,8 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 	cache.Store(ck, ce)
 	resp.Rcode = in.Rcode
 	resp.Answer = in.Answer
+	resp.Ns = in.Ns
+	resp.Extra = in.Extra
 
 	if err = w.WriteMsg(resp); err != nil {
 		log.Println("Error writing message:", err)
@@ -149,14 +118,13 @@ func init() {
 	dmsDNS := flag.String("dmsdns", "udp://223.5.5.5:53", "Domestic DNS over UDP/TLS/HTTPS")
 	proxyAddr := flag.String("proxy", "", "Address of SOCKS5 Proxy server for default DoH")
 	confPath := flag.String("conf", "sites.conf", "Sites config file path")
+	bySOA := flag.Bool("soa", false, "Diversion through the existence of SOA records")
 	ipListPath := flag.String("ips", "ips.txt", "Domestic IP/CIDR list file path")
 	cachePath = flag.String("cache", "type_cache.conf", "Type cache file path")
 	ttl := flag.Int("ttl", 0, "DNS cache TTL (second)")
 	flag.Parse()
 
-	if *ttl <= 0 {
-		cacheTTL = 300 * time.Second
-	} else {
+	if *ttl > 0 {
 		cacheTTL = time.Duration(*ttl) * time.Second
 	}
 
@@ -168,9 +136,78 @@ func init() {
 	if err := loadConfig("type_cache.conf", domainMatcher.Add); err != nil {
 		fmt.Println("Error load type cache:", err)
 	}
-	if err := loadDmsIP(*ipListPath); err != nil {
-		fmt.Println("Error load dms IP:", err)
-		os.Exit(0)
+
+	if *bySOA {
+		isDomestic = func(domain string) (bool, error) {
+			if v, ok := typeCache.Load(domain); ok {
+				return v.(bool), nil
+			}
+			isDom := domainMatcher.Find(domain[:len(domain)-1])
+			if isDom != nil {
+				return *isDom, nil
+			}
+			msg := new(dns.Msg)
+			msg.SetQuestion(domain, dns.TypeSOA)
+			in, err := dmsExchange(msg)
+			if err != nil {
+				return false, fmt.Errorf("exchange: %s", err)
+			}
+			if in.Rcode != dns.RcodeSuccess {
+				return false, fmt.Errorf("rcode: %s", dns.RcodeToString[in.Rcode])
+			}
+			for _, ans := range in.Answer {
+				if _, ok := ans.(*dns.SOA); ok {
+					typeCache.Store(domain, true)
+					return true, nil
+				}
+			}
+			typeCache.Store(domain, false)
+			return false, nil
+		}
+	} else {
+		if err := loadDmsIP(*ipListPath); err != nil {
+			fmt.Println("Error load dms IP:", err)
+			os.Exit(0)
+		}
+		isDomestic = func(domain string) (bool, error) {
+			if v, ok := typeCache.Load(domain); ok {
+				return v.(bool), nil
+			}
+			isDom := domainMatcher.Find(domain[:len(domain)-1])
+			if isDom != nil {
+				return *isDom, nil
+			}
+			msg := new(dns.Msg)
+			msg.SetQuestion(domain, dns.TypeA)
+			in, err := dmsExchange(msg)
+			if err != nil {
+				return false, fmt.Errorf("exchange: %s", err)
+			}
+			if in.Rcode != dns.RcodeSuccess {
+				return false, fmt.Errorf("rcode: %s", dns.RcodeToString[in.Rcode])
+			}
+			var ip string
+			for _, ans := range in.Answer {
+				if record, ok := ans.(*dns.A); ok {
+					ip = record.A.String()
+					continue
+				}
+			}
+			if ip == "" {
+				return false, fmt.Errorf("exchange: A record not found")
+			}
+			if strings.Contains(ip, ":") {
+				isDom, _ = ipv6Trie.Find(ip)
+			} else {
+				isDom = ipv4Trie.Find(ip)
+			}
+			if isDom == nil {
+				typeCache.Store(domain, false)
+				return false, nil
+			}
+			typeCache.Store(domain, *isDom)
+			return *isDom, nil
+		}
 	}
 
 	var httpCli *http.Client
@@ -206,15 +243,16 @@ func init() {
 			fmt.Println("Unknown domestic DNS protocol")
 			os.Exit(0)
 		}
+		addr := (*dmsDNS)[6:]
 		dmsExchange = func(req *dns.Msg) (*dns.Msg, error) {
-			in, _, err := dnsCli.Exchange(req, *dmsDNS)
+			in, _, err := dnsCli.Exchange(req, addr)
 			return in, err
 		}
 	}
 }
 
 func main() {
-	fmt.Println("YukiDNS (Go Version) v0.1.0")
+	fmt.Println("YukiDNS (Go Version) v0.2.0")
 
 	server := &dns.Server{Addr: *listenAddr, Net: "udp"}
 	dns.HandleFunc(".", handler)
