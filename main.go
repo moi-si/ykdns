@@ -60,7 +60,7 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		resp.Extra = entry.extra
 		if time.Now().Before(entry.expireAt) {
 			if err := w.WriteMsg(resp); err != nil {
-				log.Println("Error writing message:", err)
+				log.Println("ERROR writing message:", err)
 			}
 			return
 		}
@@ -86,10 +86,10 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	if err != nil {
-		log.Println("Error querying upsteam:", err)
+		log.Println("ERROR querying upsteam:", err)
 		resp.SetRcode(req, dns.RcodeServerFailure)
 		if err = w.WriteMsg(resp); err != nil {
-			log.Println("Error writing message:", err)
+			log.Println("ERROR writing message:", err)
 		}
 		return
 	}
@@ -106,7 +106,7 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 	resp.Extra = in.Extra
 
 	if err = w.WriteMsg(resp); err != nil {
-		log.Println("Error writing message:", err)
+		log.Println("ERROR writing message:", err)
 	} else {
 		log.Println("Successfully sent response")
 	}
@@ -130,11 +130,15 @@ func init() {
 
 	domainMatcher = addrtrie.NewDomainMatcher[bool]()
 	if err := loadConfig(*confPath, domainMatcher.Add); err != nil {
-		fmt.Println("Error load config:", err)
+		fmt.Println("ERROR load config:", err)
 		os.Exit(0)
 	}
-	if err := loadConfig("type_cache.conf", domainMatcher.Add); err != nil {
-		fmt.Println("Error load type cache:", err)
+	fn := func(s string, b bool) error {
+		typeCache.Store(s, b)
+		return domainMatcher.Add(s, b)
+	}
+	if err := loadConfig("type_cache.conf", fn); err != nil {
+		fmt.Println("ERROR load type cache:", err)
 	}
 
 	if *bySOA {
@@ -166,7 +170,7 @@ func init() {
 		}
 	} else {
 		if err := loadDmsIP(*ipListPath); err != nil {
-			fmt.Println("Error load dms IP:", err)
+			fmt.Println("ERROR load dms IP:", err)
 			os.Exit(0)
 		}
 		isDomestic = func(domain string) (bool, error) {
@@ -252,7 +256,7 @@ func init() {
 }
 
 func main() {
-	fmt.Println("YukiDNS (Go Version) v0.2.0")
+	fmt.Println("YukiDNS (Go Version) v0.2.1")
 
 	server := &dns.Server{Addr: *listenAddr, Net: "udp"}
 	dns.HandleFunc(".", handler)
