@@ -146,7 +146,10 @@ func init() {
 			if v, ok := typeCache.Load(domain); ok {
 				return v.(bool), nil
 			}
-			isDom := domainMatcher.Find(domain[:len(domain)-1])
+			if domain[len(domain)-1] == '.' {
+				domain = domain[:len(domain)-1]
+			}
+			isDom := domainMatcher.Find(domain)
 			if isDom != nil {
 				return *isDom, nil
 			}
