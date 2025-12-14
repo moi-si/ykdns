@@ -47,9 +47,9 @@ func loadConfig(path string, insertFunc func(string, bool) error) error {
 		}
 		var err error
 		if strings.HasPrefix(line, "dft ") {
-			err = insertFunc(line[4:len(line)-1], dft)
+			err = insertFunc(line[4:], dft)
 		} else if strings.HasPrefix(line, "dms ") {
-			err = insertFunc(line[4:len(line)-1], dms)
+			err = insertFunc(line[4:], dms)
 		} else {
 			return fmt.Errorf("line %d: `%s` is invalid", num, line)
 		}
@@ -98,9 +98,9 @@ func writeTypeCache() error {
 
 	typeCache.Range(func(k, v any) bool {
 		key := k.(string)
-		value := v.(bool)
+		typ := v.(bool)
 		var line string
-		if value == dft {
+		if typ == dft {
 			line = fmt.Sprintf("dft %s\n", key)
 		} else {
 			line = fmt.Sprintf("dms %s\n", key)

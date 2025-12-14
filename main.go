@@ -68,7 +68,7 @@ func handler(w dns.ResponseWriter, req *dns.Msg) {
 		log.Printf("Cache for %s expired and was deleted", ck)
 	}
 
-	isDom, err := isDomestic(qname)
+	isDom, err := isDomestic(qname[:len(qname)-1])
 	if err != nil {
 		log.Printf("%s: %s", qname, err)
 		return
@@ -146,15 +146,12 @@ func init() {
 			if v, ok := typeCache.Load(domain); ok {
 				return v.(bool), nil
 			}
-			if domain[len(domain)-1] == '.' {
-				domain = domain[:len(domain)-1]
-			}
 			isDom := domainMatcher.Find(domain)
 			if isDom != nil {
 				return *isDom, nil
 			}
 			msg := new(dns.Msg)
-			msg.SetQuestion(domain, dns.TypeSOA)
+			msg.SetQuestion(domain+".", dns.TypeSOA)
 			in, err := dmsExchange(msg)
 			if err != nil {
 				return false, fmt.Errorf("exchange: %s", err)
@@ -185,7 +182,7 @@ func init() {
 				return *isDom, nil
 			}
 			msg := new(dns.Msg)
-			msg.SetQuestion(domain, dns.TypeA)
+			msg.SetQuestion(domain+".", dns.TypeA)
 			in, err := dmsExchange(msg)
 			if err != nil {
 				return false, fmt.Errorf("exchange: %s", err)
